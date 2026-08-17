@@ -63,6 +63,10 @@ const SLIDERS = [
   { id:5, label:"視点の距離",           min:1.1, max:5.0, step:0.05, val:2.05, dec:2 },
 ];
 const MODES = ["水","法線","深度","厚み","粒子"];
+// 粒子数プリセット（水槽の実寸は同じ。格子の細かさだけ変わる）
+// ネイティブ -O3 実測: 42 / 42 / 58 / 82 / 113 / 172 ms。WASM はこれより遅い。
+const LEVELS = [["16³相当  約2万","0"],["N=20  約3.8万（既定）","1"],["N=24  約7万","2"],
+                ["N=28  約12万","3"],["N=32  約19万","4"],["N=38  約33万（本家の最大級・重い）","5"]];
 
 const $=id=>document.getElementById(id);
 const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
@@ -93,6 +97,14 @@ function buildPanel(){
     r.addEventListener("input",()=>{ const v=parseFloat(r.value); val.textContent=v.toFixed(s.dec); if(M) api.set(s.id,v); });
     wrap.appendChild(head); wrap.appendChild(r); panel.appendChild(wrap);
   });
+  const lw=document.createElement("label"); lw.className="ctl"; lw.style.minWidth="260px";
+  const lh=document.createElement("span"); lh.textContent="粒子数（増やすほど細かく・重く）";
+  const lsel=document.createElement("select");
+  LEVELS.forEach(([t,v])=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; lsel.appendChild(o); });
+  lsel.value="1";
+  lsel.addEventListener("change",()=>{ if(M) api.set(10, parseInt(lsel.value,10)); });
+  lw.appendChild(lh); lw.appendChild(lsel); panel.appendChild(lw);
+
   const mw=document.createElement("label"); mw.className="ctl"; mw.style.minWidth="170px";
   const mh=document.createElement("span"); mh.textContent="表示";
   const sel=document.createElement("select");
@@ -114,7 +126,7 @@ function loop(ts){
   lastT=ts;
   api.step(1); blit();
   setText(statusEl, `${fpsAvg.toFixed(0)} fps   粒子 ${(api.get(0)|0).toLocaleString()}   `+
-                    `MLS-MPM (近傍探索なし) + 画面空間の流体レンダリング`);
+                    `格子 ${api.get(4)|0}x${api.get(5)|0}x${api.get(6)|0}   MLS-MPM + 画面空間の流体レンダリング`);
   requestAnimationFrame(loop);
 }
 

@@ -41,9 +41,14 @@ static const int FW = 960, FH = 600;
 
 // ---------------------------------------------------------------- 格子
 // 領域は (GX,GY,GZ)·dx。dx は一様（MPM の要請）。
-static int   GX = 40, GY = 20, GZ = 26;    // 本家の 40x30x60 と同じ比（長い軸を左右に）
+// 水槽の実寸は 2.0 x 1.0 x 1.3 m に固定して、格子の細かさだけ変える。
+// 細かくすると粒子は N^3 で増える（＝重くなる）が、水面のディテールが上がる。
+static int   GX = 40, GY = 20, GZ = 26;
 static float DX = 1.0f / 20.0f;
 static float INV_DX = 20.0f;
+static int   PERCELL = 2;                  // 1セルの1辺あたりの粒子数（2 なら 8個/セル）
+static int   p_level = 1;                  // 粒子数プリセット（既定 = N=20）
+static const int LEVEL_N[6] = { 16, 20, 24, 28, 32, 38 };   // 高さ方向のセル数
 
 // 格子は (vx,vy,vz,m) を4つ並べて持つ。27セルを舐めるのでキャッシュに乗せたい。
 static std::vector<float> grid;      // 4 * GX*GY*GZ
@@ -73,6 +78,20 @@ static int   SUBSTEP = 2;
 static void retune() {
     float c = sqrtf(E_BULK / P_RHO);
     DT = 0.35f * DX / c;
+}
+
+// 粒子数プリセット。水槽の実寸は変えず、格子の細かさだけ変える。
+// ★ P_VOL を PERCELL に合わせて直すこと。1セルあたりの粒子数が変わるのに
+//   1粒子の担う体積を固定にすると、密度が変わって水でなくなる。
+static void set_level(int lv) {
+    if (lv < 0) lv = 0; if (lv > 5) lv = 5;
+    p_level = lv;
+    int N = LEVEL_N[lv];
+    DX = 1.0f / N; INV_DX = (float)N;
+    GX = (int)(2.00f * N + 0.5f);
+    GY = N;
+    GZ = (int)(1.30f * N + 0.5f);
+    retune();
 }
 
 // ---------------------------------------------------------------- 乱数
@@ -243,9 +262,9 @@ static void setup(int scene) {
     // 本家 initDambreak と同じ取り方：幅は端から3セル、高さは 0.8H、奥行きは半分まで
     float e = 3.0f * DX;
     if (scene == 0) {
-        fill_block(e, e, e, W - 4 * DX, H * 0.80f, D * 0.5f, 2);
+        fill_block(e, e, e, W - 4 * DX, H * 0.80f, D * 0.5f, PERCELL);
     } else {                    // 水槽：底に一様に溜める
-        fill_block(e, e, e, W - 4 * DX, H * 0.34f, D - 4 * DX, 2);
+        fill_block(e, e, e, W - 4 * DX, H * 0.34f, D - 4 * DX, PERCELL);
     }
 }
 
@@ -682,12 +701,15 @@ static void render_fluid() {
 // ================================================================ ABI
 extern "C" {
 
+KEEP void sim_reset();
+
 KEEP int sim_w() { return FW; }
 KEEP int sim_h() { return FH; }
 
 KEEP void sim_reset() {
     grid.assign((size_t)GX * GY * GZ * 4, 0.0f);
-    P_VOL = (DX * 0.5f) * (DX * 0.5f) * (DX * 0.5f);
+    float sp = DX / PERCELL;                       // 粒子の間隔
+    P_VOL = sp * sp * sp;                          // ★1粒子が担う体積は間隔の3乗
     P_MASS = P_VOL * P_RHO;
     retune();
     setup(0);
@@ -726,6 +748,8 @@ KEEP void sim_set(int id, double v) {
     case 7: p_absorb = (float)v; break;
     case 8: p_smooth = (float)v; break;
     case 9: p_mode = (int)(v + 0.5); break;
+    case 10: { int lv = (int)(v + 0.5); if (lv != p_level) { set_level(lv); sim_reset(); } break; }
+    case 11: { int pc = (int)(v + 0.5); if (pc != PERCELL && pc >= 1 && pc <= 3) { PERCELL = pc; sim_reset(); } break; }
     case 13: p_hud = v > 0.5 ? 1 : 0; break;
     default: break;
     }
@@ -740,6 +764,11 @@ KEEP double sim_get(int id) {
     switch (id) {
     case 0: return (double)pars.size();
     case 1: return (double)frameNo;
+    case 2: return (double)p_level;
+    case 3: return (double)PERCELL;
+    case 4: return (double)GX;
+    case 5: return (double)GY;
+    case 6: return (double)GZ;
     default: return 0;
     }
 }
@@ -779,6 +808,9 @@ int main(int argc, char** argv) {
     int frames = argc > 1 ? atoi(argv[1]) : 200;
     const char* out = argc > 2 ? argv[2] : "umi.png";
     sim_init(12345, 0);
+    if (const char* e = getenv("LEVEL")) { sim_set(10, atof(e)); }
+    if (const char* e = getenv("PERCELL")) { sim_set(11, atof(e)); }
+    if (const char* e = getenv("SUB")) { sim_set(2, atof(e)); }
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < frames; ++i) sim_step(1);
     auto t1 = std::chrono::high_resolution_clock::now();
