@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Umi OS - 3次元の水 / MLS-MPM (C++/WASM)</title>
+<style>
+  :root{ --fg:#3f7fa8; --ink:#2a3138; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:#eceef0; color:var(--ink); font-family:'Courier New',monospace;
+        min-height:100vh; display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+  h1{ font-size:16px; margin:0; font-weight:700; color:var(--ink); }
+  .sub{ font-size:12px; color:#5c6670; max-width:960px; text-align:center; line-height:1.65; }
+  canvas{ width:min(96vw,960px); height:auto; background:#b9bcc0;
+          border:1px solid #c3c7cb; border-radius:6px; box-shadow:0 6px 26px #0002; cursor:crosshair; }
+  #panel{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:center; max-width:960px; }
+  .ctl{ display:flex; flex-direction:column; font-size:11px; color:#5c6670; min-width:150px; }
+  .ctl b{ color:var(--fg); }
+  input[type=range]{ accent-color:var(--fg); }
+  select{ font-family:inherit; font-size:12px; margin-top:3px; padding:4px 6px; border-radius:5px;
+          background:#fff; color:var(--ink); border:1px solid #b9bfc5; }
+  button{ font-family:inherit; font-size:13px; padding:7px 13px; border:1px solid #b9bfc5; border-radius:6px;
+          background:#fff; color:var(--ink); cursor:pointer; min-width:150px; }
+  button:hover{ background:#f5f6f7; }
+  button:active{ transform:translateY(1px); }
+  #status{ font-size:12px; color:#5c6670; font-variant-numeric:tabular-nums; min-height:1.2em; text-align:center; }
+  a{ color:var(--fg); }
+  body.fs{ padding:0; background:#b9bcc0; gap:0; }
+  body.fs h1, body.fs .sub, body.fs #panel, body.fs #status{ display:none; }
+  body.fs canvas{ position:fixed; inset:0; width:100vw; height:100vh; max-width:none;
+                  object-fit:contain; border:none; border-radius:0; box-shadow:none; cursor:none; }
+</style>
+</head>
+<body>
+  <h1>3次元の水 — MLS-MPM <span style="color:#5c6670;font-size:12px">(C++ / WASM, GPU なし)</span></h1>
+  <p class="sub">
+    <a href="https://github.com/matsuoka-601/webgpu-ocean">webgpu-ocean</a> と同じ骨格を、GPU を使わず C++ だけで。<br>
+    <b>MLS-MPM</b>：粒子は 3×3×3 の格子に質量と運動量を撒き（P2G）、格子で重力と壁を掛け、
+    また集め直す（G2P）。<b>近傍探索が要らない O(N)</b> なので CPU でも回ります。
+    水は応力が圧力だけなので <b>stress = −dt·V·4/dx²·E·(J−1)</b> のスカラーで済みます。<br>
+    <b>描画は画面空間の流体レンダリング</b>：粒子を球として深度だけ撒き → その深度を
+    <b>narrow-range filter</b> でならし → 深度から法線を復元 → 厚みで吸収（Beer-Lambert）→
+    フレネルで反射と屈折を混ぜる。<b>水の青は色を塗ったのではなく、赤から先に吸われた結果</b>です。<br>
+    <b>⛶ フルスクリーン</b>（または F キー）。
+  </p>
+  <canvas id="cv"></canvas>
+  <div id="panel"></div>
+  <div id="status">読み込み中…</div>
+  <p class="sub">ソース: <a href="https://github.com/yomei-o/umi_emu_cpp">github.com/yomei-o/umi_emu_cpp</a></p>
+
+<script src="sim.js"></script>
+<script>
+"use strict";
+const SLIDERS = [
+  { id:2, label:"サブステップ",        min:1,   max:6,   step:1,    val:2,    dec:0 },
+  { id:0, label:"体積弾性率 E",        min:80,  max:1200,step:20,   val:400,  dec:0 },
+  { id:1, label:"重力 [m/s²]",         min:0,   max:25,  step:0.1,  val:9.8,  dec:1 },
+  { id:6, label:"球の半径 (dx)",       min:0.5, max:2.0, step:0.05, val:0.95, dec:2 },
+  { id:8, label:"表面の平滑化",         min:0.2, max:3.0, step:0.1,  val:1.7,  dec:1 },
+  { id:7, label:"水の濃さ (吸収)",      min:0.4, max:9.0, step:0.1,  val:3.2,  dec:1 },
+  { id:3, label:"視点の向き [°]",       min:-180,max:180, step:1,    val:36,   dec:0 },
+  { id:4, label:"視点の高さ [°]",       min:-5,  max:70,  step:1,    val:14,   dec:0 },
+  { id:5, label:"視点の距離",           min:1.1, max:5.0, step:0.05, val:2.05, dec:2 },
+];
+const MODES = ["水","法線","深度","厚み","粒子"];
+
+const $=id=>document.getElementById(id);
+const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
+let M=null, api={}, W=0, H=0, img=null, lastT=0, fpsAvg=0;
+
+createSim().then(mod=>{
+  M=mod;
+  for (const [k,sig] of Object.entries({init:["number",["number","number"]],w:["number",[]],h:["number",[]],
+      reset:[null,[]],step:[null,["number"]],render:["number",[]],click:[null,["number","number"]],
+      set:[null,["number","number"]],action:[null,["number"]],get:["number",["number"]]}))
+    api[k]=M.cwrap("sim_"+k, sig[0], sig[1]);
+  api.init(0,0);
+  W=api.w(); H=api.h(); cv.width=W; cv.height=H; img=ctx.createImageData(W,H);
+  buildPanel();
+  SLIDERS.forEach(s=>api.set(s.id, s.val));
+  requestAnimationFrame(loop);
+});
+
+function setText(b,t){ if(b&&b.textContent!==t) b.textContent=t; }
+
+function buildPanel(){
+  SLIDERS.forEach(s=>{
+    const wrap=document.createElement("label"); wrap.className="ctl";
+    const head=document.createElement("span"); const val=document.createElement("b");
+    val.textContent=Number(s.val).toFixed(s.dec); head.textContent=s.label+" "; head.appendChild(val);
+    const r=document.createElement("input");
+    r.type="range"; r.min=s.min; r.max=s.max; r.step=s.step; r.value=s.val;
+    r.addEventListener("input",()=>{ const v=parseFloat(r.value); val.textContent=v.toFixed(s.dec); if(M) api.set(s.id,v); });
+    wrap.appendChild(head); wrap.appendChild(r); panel.appendChild(wrap);
+  });
+  const mw=document.createElement("label"); mw.className="ctl"; mw.style.minWidth="170px";
+  const mh=document.createElement("span"); mh.textContent="表示";
+  const sel=document.createElement("select");
+  MODES.forEach((t,i)=>{ const o=document.createElement("option"); o.value=i; o.textContent=t; sel.appendChild(o); });
+  sel.addEventListener("change",()=>{ if(M) api.set(9, parseInt(sel.value,10)); });
+  mw.appendChild(mh); mw.appendChild(sel); panel.appendChild(mw);
+
+  const mk=(t,fn)=>{ const b=document.createElement("button"); b.textContent=t;
+    b.addEventListener("click",()=>{ if(M) fn(); }); panel.appendChild(b); return b; };
+  mk("↺ ダムブレイク", ()=>api.action(0));
+  mk("水槽にする",     ()=>api.action(1));
+  mk("⛶ フルスクリーン (F)", toggleFullscreen);
+}
+
+function blit(){ const p=api.render(); img.data.set(M.HEAPU8.subarray(p,p+W*H*4)); ctx.putImageData(img,0,0); }
+
+function loop(ts){
+  if(lastT){ const f=1000/(ts-lastT); fpsAvg = fpsAvg? fpsAvg*0.9+f*0.1 : f; }
+  lastT=ts;
+  api.step(1); blit();
+  setText(statusEl, `${fpsAvg.toFixed(0)} fps   粒子 ${(api.get(0)|0).toLocaleString()}   `+
+                    `MLS-MPM (近傍探索なし) + 画面空間の流体レンダリング`);
+  requestAnimationFrame(loop);
+}
+
+function applyFs(on){ document.body.classList.toggle("fs", on); if(M) api.set(13, on?0:1); }
+function toggleFullscreen(){
+  if(document.fullscreenElement) document.exitFullscreen();
+  else (document.documentElement.requestFullscreen?.() || Promise.reject()).catch(()=>applyFs(!document.body.classList.contains("fs")));
+}
+document.addEventListener("fullscreenchange",()=>applyFs(!!document.fullscreenElement));
+window.addEventListener("keydown",e=>{
+  if(e.key==="f"||e.key==="F") toggleFullscreen();
+  else if(e.key==="Escape"&&!document.fullscreenElement) applyFs(false);
+});
+</script>
+</body>
+</html>
