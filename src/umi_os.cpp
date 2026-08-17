@@ -41,9 +41,9 @@ static const int FW = 960, FH = 600;
 
 // ---------------------------------------------------------------- 格子
 // 領域は (GX,GY,GZ)·dx。dx は一様（MPM の要請）。
-static int   GX = 48, GY = 32, GZ = 32;
-static float DX = 1.0f / 32.0f;
-static float INV_DX = 32.0f;
+static int   GX = 40, GY = 20, GZ = 26;    // 本家の 40x30x60 と同じ比（長い軸を左右に）
+static float DX = 1.0f / 20.0f;
+static float INV_DX = 20.0f;
 
 // 格子は (vx,vy,vz,m) を4つ並べて持つ。27セルを舐めるのでキャッシュに乗せたい。
 static std::vector<float> grid;      // 4 * GX*GY*GZ
@@ -240,20 +240,23 @@ static void fill_block(float x0, float y0, float z0, float x1, float y1, float z
 static void setup(int scene) {
     pars.clear();
     float W = GX * DX, H = GY * DX, D = GZ * DX;
-    if (scene == 0) {           // ダムブレイク：片側に積んだ水を崩す
-        fill_block(0.06f, 0.06f, D * 0.20f, W * 0.36f, H * 0.62f, D * 0.80f, 2);
-    } else {                    // 水槽：底に溜めておく
-        fill_block(0.06f, 0.06f, 0.06f, W - 0.06f, H * 0.30f, D - 0.06f, 2);
+    // 本家 initDambreak と同じ取り方：幅は端から3セル、高さは 0.8H、奥行きは半分まで
+    float e = 3.0f * DX;
+    if (scene == 0) {
+        fill_block(e, e, e, W - 4 * DX, H * 0.80f, D * 0.5f, 2);
+    } else {                    // 水槽：底に一様に溜める
+        fill_block(e, e, e, W - 4 * DX, H * 0.34f, D - 4 * DX, 2);
     }
 }
 
 // ================================================================ カメラ
-static float camAz = 0.62f, camEl = 0.24f, camR = 2.05f, camF = 980.0f;
+// 本家: 距離 70 セル、fov 45°、注視点 (W/2, H/4, D/2)。camF = (FH/2)/tan(fov/2)
+static float camAz = 0.34f, camEl = 0.13f, camR = 2.30f, camF = 724.0f;
 static float camX, camY, camZ, cyaw, syaw, cpit, spit;
 static float tgtX, tgtY, tgtZ;
 
 static void setup_camera() {
-    tgtX = GX * DX * 0.5f; tgtY = GY * DX * 0.26f; tgtZ = GZ * DX * 0.5f;
+    tgtX = GX * DX * 0.5f; tgtY = GY * DX * 0.25f; tgtZ = GZ * DX * 0.5f;
     camX = tgtX + camR * cosf(camEl) * sinf(camAz);
     camY = tgtY + camR * sinf(camEl);
     camZ = tgtZ - camR * cosf(camEl) * cosf(camAz);
@@ -305,10 +308,13 @@ static const int RS = 2;
 static const int RW = FW / RS, RH = FH / RS;
 static inline float rcamF() { return camF / RS; }
 
-static float p_radius = 0.95f;         // 球の半径（dx 単位）
-static float p_absorb = 3.2f;          // 吸収の強さ [1/m]
+static float p_radius = 0.88f;         // 球の半径（dx 単位）
+// 本家 fluid.wgsl の定数をそのまま
+static const float BG_GREY = 0.80f;                                   // 背景の灰
+static const float DIFF_R = 0.085f, DIFF_G = 0.6375f, DIFF_B = 0.9f;  // diffuseColor
+static float p_absorb = 1.5f;          // density（本家の値）
 static int   p_mode   = 0;             // 0:水 1:法線 2:深度 3:厚み 4:点
-static float p_smooth = 1.7f;          // 平滑化の強さ
+static float p_smooth = 2.0f;          // 平滑化の強さ
 
 // ---- 速い exp とガンマ ----
 // 毎画素で expf を3回・powf を4回呼ぶと、そこだけで 50ms を超える。表にする。
@@ -354,24 +360,18 @@ static inline void ray_of(float sx, float sy, float& dx, float& dy, float& dz) {
 // 水の底が少し歪んで見えるようにしてある。
 static inline void bg_shade(float ox, float oy, float oz, float dx, float dy, float dz,
                             float& r, float& g, float& b) {
-    float H = GY * DX;
-    float k;
-    if (dy < -1e-5f) {
-        float t = (0.0f - oy) / dy;                    // 床までの距離
-        k = 0.60f + 0.16f / (1.0f + t * 0.10f);        // 手前の床がわずかに明るい
-    } else {
-        float t = clampf(dy * 2.2f, 0.0f, 1.0f);       // 上へ行くほどわずかに明るい
-        k = 0.62f + 0.22f * t;
-    }
-    (void)H; (void)ox; (void)oz; (void)dx; (void)dz;
-    r = k * 0.985f; g = k * 0.995f; b = k * 1.0f;      // ほんのり寒色寄りのニュートラル
+    // 本家と同じ、完全にフラットな灰 0.8
+    (void)ox; (void)oy; (void)oz; (void)dx; (void)dy; (void)dz;
+    r = BG_GREY; g = BG_GREY; b = BG_GREY;
 }
 
 // 空（反射に使う）
 static inline void sky_shade(float dx, float dy, float dz, float& r, float& g, float& b) {
+    // 本家は青空の cubemap。実際の平均色: 上(0.35,0.56,0.74) 下(0.24,0.35,0.49) 横(0.37,0.54,0.68)
     float t = clampf(dy * 0.5f + 0.5f, 0, 1);
-    float k = 0.52f + 0.44f * t;
-    r = k * 0.97f; g = k * 0.99f; b = k * 1.0f;
+    r = 0.235f + 0.185f * t;
+    g = 0.350f + 0.245f * t;
+    b = 0.485f + 0.290f * t;
     // 太陽（powf を使わず 8乗を掛け算で。毎画素なので効く）
     float d = dx * 0.42f + dy * 0.78f + dz * 0.46f;
     if (d > 0.90f) { float u = (d - 0.90f) * 10.0f; u *= u; u *= u; r += u * 2.2f; g += u * 2.2f; b += u * 2.1f; }
@@ -423,10 +423,9 @@ static void pass_depth() {
     float rw = p_radius * DX;
     dbgDrawn = 0;
     bbX0 = RW; bbX1 = -1; bbY0 = RH; bbY1 = -1;
-    // ★厚みは「弦の和」なので、そのままだと粒子の重なりぶん過大になる。
-    //   1粒子が担う体積 P_VOL と球の体積の比を掛けると、視線が水を通った【実際の長さ[m]】になる。
-    //   （最初これを掛けずに吸収を掛けたので水が真っ黒になった）
-    const float tscale = P_VOL / (4.18879f * rw * rw * rw);
+    // 厚みは本家と同じ「粒子ごとに 0.05·√(1−r²) を足すだけ」の無次元量。
+    // （物理的な光路長[m]に直す道もあるが、吸収係数まで本家に合わせたいのでこちらに揃える）
+    const float tscale = 0.05f;
     for (const Par& q : pars) {
         if (is_interior(q)) continue;                    // ★内部は描かない
         float sx, sy, dep;
@@ -453,7 +452,7 @@ static void pass_depth() {
                 float z = dep - rw * nz;                 // 球の手前側
                 size_t o = (size_t)y * RW + x;
                 if (z < depthBuf[o]) depthBuf[o] = z;
-                thickBuf[o] += nz * rw * 2.0f * tscale;  // 弦の長さ → 実長さ [m]
+                thickBuf[o] += nz * tscale;              // 本家と同じ積み方
             }
         }
     }
@@ -465,8 +464,8 @@ static void filter_depth() {
     float sig = 0.55f * R;
     std::vector<float> w(R + 1);
     for (int i = 0; i <= R; ++i) w[i] = expf(-0.5f * (i * i) / (sig * sig));
-    const float LO = 0.9f * p_radius * DX;               // 手前側は狭く（輪郭を溶かさない）
-    const float HI = 3.5f * p_radius * DX;               // 奥側は広く
+    const float LO = 1.6f * p_radius * DX;               // 手前側は狭く（輪郭を溶かさない）
+    const float HI = 5.0f * p_radius * DX;               // 奥側は広く
     int fy0 = bbY0 - R - 1, fy1 = bbY1 + R + 1, fx0 = bbX0 - R - 1, fx1 = bbX1 + R + 1;
     if (fy0 < 0) fy0 = 0; if (fx0 < 0) fx0 = 0;
     if (fy1 > RH - 1) fy1 = RH - 1; if (fx1 > RW - 1) fx1 = RW - 1;
@@ -577,19 +576,19 @@ static void shade() {
             // --- 視線ベクトル（ワールド）---
             float vx, vy, vz; ray_of(x + 0.5f, y + 0.5f, vx, vy, vz);
 
-            // --- 屈折：背景を法線ぶんずらして取る（画面空間の近似）---
+            // --- 屈折：本家は背景をずらさない。平らな背景に透過率を掛けるだけ ---
             float th = thickBuf[o];
-            float bend = 26.0f * clampf(th * 2.0f, 0.0f, 1.0f);
-            int rx = (int)(x + wx_ * bend), ry = (int)(y - wy_ * bend);
-            rx = rx < 0 ? 0 : (rx > RW - 1 ? RW - 1 : rx);
-            ry = ry < 0 ? 0 : (ry > RH - 1 ? RH - 1 : ry);
-            const float* rb = &bgBuf[((size_t)ry * RW + rx) * 3];
-            float tr = rb[0], tg = rb[1], tb2 = rb[2];
+            float tr = BG_GREY, tg = BG_GREY, tb2 = BG_GREY;
 
             // --- 吸収（Beer-Lambert）。水は赤から吸う ---
-            // 水の色は「吸収の波長依存」だけで作る。赤から先に吸われるので自然に濃い青になる。
-            float a = th * p_absorb;
-            tr *= fexp(-a * 6.20f); tg *= fexp(-a * 2.30f); tb2 *= fexp(-a * 0.70f);
+            // ★ ここが肝。透過率 exp(−density·厚み·(1−diffuseColor))。
+            //   diffuseColor=(0.085,0.6375,0.9) なので消散係数は (0.915,0.3625,0.1)。
+            //   **青はほとんど吸われない**（赤の 9 分の 1）。だから厚くなっても黒ではなく
+            //   濃い群青に落ち着く。ここを (6.2,2.3,0.7) にしていたので黒くなっていた。
+            float d = p_absorb * th;
+            tr *= fexp(-d * (1.0f - DIFF_R));
+            tg *= fexp(-d * (1.0f - DIFF_G));
+            tb2 *= fexp(-d * (1.0f - DIFF_B));
 
             // --- 反射（空）---
             float dot = vx * wx_ + vy * wy_ + vz * wz_;
@@ -606,15 +605,19 @@ static void shade() {
             float b = tb2 * (1 - f) + sb * f;
 
             // --- 鏡面（太陽）---
-            float hx = 0.42f - vx, hy = 0.78f - vy, hz = 0.46f - vz;
+            // 本家: lightDir はワールドの (0,0,-1)、H = normalize(lightDir − rayDir)、pow(dot(H,n), 250)
+            float hx = 0.0f - vx, hy = 0.0f - vy, hz = -1.0f - vz;
             float hl = 1.0f / sqrtf(hx * hx + hy * hy + hz * hz + 1e-9f);
             float sp = clampf((hx * wx_ + hy * wy_ + hz * wz_) * hl, 0, 1);
-            float s2 = sp * sp; s2 *= s2; s2 *= s2;       // sp^8
-            float spec = (sp > 0.86f) ? s2 * s2 * s2 * 1.6f : 0.0f;   // 実質 sp^24 相当
+            float s2 = sp * sp; s2 *= s2; s2 *= s2; s2 *= s2;    // sp^16
+            float spec = s2 * s2 * s2 * s2;                      // sp^256 ≒ 本家の 250
             r += spec; g += spec; b += spec;
 
-            r = r / (1 + r); g = g / (1 + g); b = b / (1 + b);
-            small_[o] = rgb(fgam(r), fgam(g), fgam(b));
+            // ★ 本家はトーンマップもガンマも掛けない。素通しでクランプするだけ。
+            //   ここを掛けていたので全体が白っぽく眠くなっていた。
+            small_[o] = rgb((int)(clampf(r, 0, 1) * 255.0f + 0.5f),
+                            (int)(clampf(g, 0, 1) * 255.0f + 0.5f),
+                            (int)(clampf(b, 0, 1) * 255.0f + 0.5f));
         }
     }
 }
