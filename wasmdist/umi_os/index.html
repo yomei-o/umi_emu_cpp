@@ -11,7 +11,7 @@
         min-height:100vh; display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
   h1{ font-size:16px; margin:0; font-weight:700; color:var(--ink); }
   .sub{ font-size:12px; color:#5c6670; max-width:960px; text-align:center; line-height:1.65; }
-  canvas{ width:min(96vw,960px); height:auto; background:#b9bcc0;
+  canvas{ width:min(96vw,960px); height:auto; background:#cccccc;
           border:1px solid #c3c7cb; border-radius:6px; box-shadow:0 6px 26px #0002; cursor:crosshair; }
   #panel{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:center; max-width:960px; }
   .ctl{ display:flex; flex-direction:column; font-size:11px; color:#5c6670; min-width:150px; }
@@ -25,23 +25,24 @@
   button:active{ transform:translateY(1px); }
   #status{ font-size:12px; color:#5c6670; font-variant-numeric:tabular-nums; min-height:1.2em; text-align:center; }
   a{ color:var(--fg); }
-  body.fs{ padding:0; background:#b9bcc0; gap:0; }
+  body.fs{ padding:0; background:#cccccc; gap:0; }
   body.fs h1, body.fs .sub, body.fs #panel, body.fs #status{ display:none; }
   body.fs canvas{ position:fixed; inset:0; width:100vw; height:100vh; max-width:none;
-                  object-fit:contain; border:none; border-radius:0; box-shadow:none; cursor:none; }
+                  object-fit:contain; border:none; border-radius:0; box-shadow:none; cursor:crosshair; }
 </style>
 </head>
 <body>
   <h1>3次元の水 — MLS-MPM <span style="color:#5c6670;font-size:12px">(C++ / WASM, GPU なし)</span></h1>
   <p class="sub">
-    <a href="https://github.com/matsuoka-601/webgpu-ocean">webgpu-ocean</a> と同じ骨格を、GPU を使わず C++ だけで。<br>
-    <b>MLS-MPM</b>：粒子は 3×3×3 の格子に質量と運動量を撒き（P2G）、格子で重力と壁を掛け、
-    また集め直す（G2P）。<b>近傍探索が要らない O(N)</b> なので CPU でも回ります。
-    水は応力が圧力だけなので <b>stress = −dt·V·4/dx²·E·(J−1)</b> のスカラーで済みます。<br>
-    <b>描画は画面空間の流体レンダリング</b>：粒子を球として深度だけ撒き → その深度を
-    <b>narrow-range filter</b> でならし → 深度から法線を復元 → 厚みで吸収（Beer-Lambert）→
-    フレネルで反射と屈折を混ぜる。<b>水の青は色を塗ったのではなく、赤から先に吸われた結果</b>です。<br>
-    <b>⛶ フルスクリーン</b>（または F キー）。
+    <a href="https://github.com/matsuoka-601/webgpu-ocean">webgpu-ocean</a> を、GPU を使わず C++ だけで。
+    <b>物性・描画の定数まで本家に合わせてあります</b>（格子1マス＝1、dt 0.20、重力 0.3、剛性 3、rest 密度 4、動粘性 0.1）。<br>
+    <b>MLS-MPM</b>：粒子は 3×3×3 の格子に質量と運動量を撒き（P2G）、<b>格子から測った密度</b>で圧力を出し
+    （Tait, 指数5・<b>負圧は捨てる</b>）、格子で重力と壁を掛け、また集め直す（G2P）。
+    近傍探索が要らない O(N) なので CPU でも回ります。<br>
+    <b>描画は画面空間の流体レンダリング</b>：粒子を球として深度だけ撒き → 双方向フィルタを4往復 →
+    深度から法線を復元 → 厚みで吸収（Beer-Lambert）→ フレネルで夕空の反射と屈折を混ぜる。
+    <b>水の青は色を塗ったのではなく、赤から先に吸われた結果</b>です。<br>
+    <b>水面をクリック</b>すると叩けます。<b>⛶ フルスクリーン</b>（または F キー）。
   </p>
   <canvas id="cv"></canvas>
   <div id="panel"></div>
@@ -51,26 +52,34 @@
 <script src="sim.js"></script>
 <script>
 "use strict";
+// id は sim_set の番号。既定値は本家 webgpu-ocean と同じ。
 const SLIDERS = [
-  { id:2, label:"サブステップ",        min:1,   max:6,   step:1,    val:2,    dec:0 },
-  { id:0, label:"体積弾性率 E",        min:80,  max:1200,step:20,   val:400,  dec:0 },
-  { id:1, label:"重力 [m/s²]",         min:0,   max:25,  step:0.1,  val:9.8,  dec:1 },
-  { id:6, label:"球の半径 (dx)",       min:0.5, max:2.0, step:0.05, val:0.95, dec:2 },
-  { id:8, label:"表面の平滑化",         min:0.2, max:3.0, step:0.1,  val:1.7,  dec:1 },
-  { id:7, label:"水の濃さ (吸収)",      min:0.4, max:9.0, step:0.1,  val:3.2,  dec:1 },
-  { id:3, label:"視点の向き [°]",       min:-180,max:180, step:1,    val:36,   dec:0 },
-  { id:4, label:"視点の高さ [°]",       min:-5,  max:70,  step:1,    val:14,   dec:0 },
-  { id:5, label:"視点の距離",           min:1.1, max:5.0, step:0.05, val:2.05, dec:2 },
+  { id:2,  label:"サブステップ",              min:1,   max:4,   step:1,    val:2,    dec:0 },
+  { id:0,  label:"剛性 (Tait の k)",           min:1,   max:8,   step:0.5,  val:3,    dec:1 },
+  { id:1,  label:"重力",                       min:0,   max:1.0, step:0.02, val:0.3,  dec:2 },
+  { id:11, label:"動粘性",                     min:0,   max:0.6, step:0.02, val:0.1,  dec:2 },
+  { id:12, label:"奥の壁を寄せる（波を作る）",  min:0.5, max:1.0, step:0.01, val:1.0,  dec:2 },
+  { id:6,  label:"球の半径 (マス)",             min:0.4, max:1.0, step:0.05, val:0.6,  dec:2 },
+  { id:8,  label:"表面の平滑化",                min:0.4, max:2.0, step:0.1,  val:1.0,  dec:1 },
+  { id:7,  label:"水の濃さ (吸収)",             min:0.5, max:4.0, step:0.1,  val:1.5,  dec:1 },
+  { id:3,  label:"視点の向き [°]",              min:-180,max:180, step:1,    val:135,  dec:0 },
+  { id:4,  label:"視点の高さ [°]",              min:-5,  max:60,  step:1,    val:15,   dec:0 },
+  { id:5,  label:"視点の距離 (マス)",            min:25,  max:150, step:1,    val:60,   dec:0 },
 ];
 const MODES = ["水","法線","深度","厚み","粒子"];
-// 粒子数プリセット（水槽の実寸は同じ。格子の細かさだけ変わる）
-// ネイティブ -O3 実測: 42 / 42 / 58 / 82 / 113 / 172 ms。WASM はこれより遅い。
-const LEVELS = [["16³相当  約2万","0"],["N=20  約3.8万（既定）","1"],["N=24  約7万","2"],
-                ["N=28  約12万","3"],["N=32  約19万","4"],["N=38  約33万（本家の最大級・重い）","5"]];
+// 粒子数プリセット。箱の形・粒子数・距離は本家 main.ts のものを使う（[1]..[4] がそれ）。
+// ネイティブ -O3 実測: 22 / 33 / 47 / 69 / (lv4 は重い) ms/frame。WASM はこれより遅い。
+const LEVELS = [["2万  箱 30x22x45（軽い）","0"],
+                ["4万  箱 35x25x55（既定・本家の小）","1"],
+                ["7万  箱 40x30x60（本家の既定）","2"],
+                ["12万 箱 45x40x80","3"],
+                ["20万 箱 50x50x80（本家の最大・重い）","4"]];
+const RESO = [["標準（1/2 解像度）","2"],["高精細（全解像度・4倍重い）","1"]];
 
 const $=id=>document.getElementById(id);
 const cv=$("cv"), ctx=cv.getContext("2d"), panel=$("panel"), statusEl=$("status");
 let M=null, api={}, W=0, H=0, img=null, lastT=0, fpsAvg=0;
+let boxRatio=1.0, distSlider=null;
 
 createSim().then(mod=>{
   M=mod;
@@ -81,7 +90,7 @@ createSim().then(mod=>{
   api.init(0,0);
   W=api.w(); H=api.h(); cv.width=W; cv.height=H; img=ctx.createImageData(W,H);
   buildPanel();
-  SLIDERS.forEach(s=>api.set(s.id, s.val));
+  SLIDERS.forEach(s=>{ if(s.id!==12) api.set(s.id, s.val); });
   requestAnimationFrame(loop);
 });
 
@@ -94,39 +103,57 @@ function buildPanel(){
     val.textContent=Number(s.val).toFixed(s.dec); head.textContent=s.label+" "; head.appendChild(val);
     const r=document.createElement("input");
     r.type="range"; r.min=s.min; r.max=s.max; r.step=s.step; r.value=s.val;
-    r.addEventListener("input",()=>{ const v=parseFloat(r.value); val.textContent=v.toFixed(s.dec); if(M) api.set(s.id,v); });
+    r.addEventListener("input",()=>{
+      const v=parseFloat(r.value); val.textContent=v.toFixed(s.dec);
+      if(s.id===12) boxRatio=v;            // 奥の壁は毎フレーム少しずつ動かす
+      else if(M) api.set(s.id,v);
+    });
+    if(s.id===5) distSlider={r:r,val:val,dec:s.dec};
     wrap.appendChild(head); wrap.appendChild(r); panel.appendChild(wrap);
   });
-  const lw=document.createElement("label"); lw.className="ctl"; lw.style.minWidth="260px";
-  const lh=document.createElement("span"); lh.textContent="粒子数（増やすほど細かく・重く）";
-  const lsel=document.createElement("select");
-  LEVELS.forEach(([t,v])=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; lsel.appendChild(o); });
-  lsel.value="1";
-  lsel.addEventListener("change",()=>{ if(M) api.set(10, parseInt(lsel.value,10)); });
-  lw.appendChild(lh); lw.appendChild(lsel); panel.appendChild(lw);
-
-  const mw=document.createElement("label"); mw.className="ctl"; mw.style.minWidth="170px";
-  const mh=document.createElement("span"); mh.textContent="表示";
-  const sel=document.createElement("select");
-  MODES.forEach((t,i)=>{ const o=document.createElement("option"); o.value=i; o.textContent=t; sel.appendChild(o); });
-  sel.addEventListener("change",()=>{ if(M) api.set(9, parseInt(sel.value,10)); });
-  mw.appendChild(mh); mw.appendChild(sel); panel.appendChild(mw);
+  const mkSel=(label,items,initial,fn,minw)=>{
+    const w=document.createElement("label"); w.className="ctl"; if(minw) w.style.minWidth=minw;
+    const h=document.createElement("span"); h.textContent=label;
+    const sel=document.createElement("select");
+    items.forEach(([t,v])=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; sel.appendChild(o); });
+    sel.value=initial;
+    sel.addEventListener("change",()=>{ if(M) fn(parseInt(sel.value,10)); });
+    w.appendChild(h); w.appendChild(sel); panel.appendChild(w); return sel;
+  };
+  mkSel("粒子数（増やすほど細かく・重く）", LEVELS, "1", v=>{
+    api.set(10, v);
+    boxRatio=1.0;
+    // 箱が変わると距離も引き直されるので、スライダを読み戻す
+    const d=api.get(7);
+    if(distSlider){ distSlider.r.value=d; distSlider.val.textContent=Number(d).toFixed(distSlider.dec); }
+  }, "270px");
+  mkSel("解像度", RESO, "2", v=>api.set(14, v), "220px");
+  mkSel("表示", MODES.map((t,i)=>[t,String(i)]), "0", v=>api.set(9, v), "150px");
 
   const mk=(t,fn)=>{ const b=document.createElement("button"); b.textContent=t;
-    b.addEventListener("click",()=>{ if(M) fn(); }); panel.appendChild(b); return b; };
+    b.addEventListener("click",()=>{ if(M){ fn(); boxRatio=1.0; } }); panel.appendChild(b); return b; };
   mk("↺ ダムブレイク", ()=>api.action(0));
-  mk("水槽にする",     ()=>api.action(1));
+  mk("水槽（静かな海面）", ()=>api.action(1));
+  mk("飛沫（水塊を落とす）", ()=>api.action(2));
   mk("⛶ フルスクリーン (F)", toggleFullscreen);
 }
+
+cv.addEventListener("pointerdown", e=>{
+  if(!M) return;
+  const r=cv.getBoundingClientRect();
+  api.click((e.clientX-r.left)*W/r.width, (e.clientY-r.top)*H/r.height);
+});
 
 function blit(){ const p=api.render(); img.data.set(M.HEAPU8.subarray(p,p+W*H*4)); ctx.putImageData(img,0,0); }
 
 function loop(ts){
   if(lastT){ const f=1000/(ts-lastT); fpsAvg = fpsAvg? fpsAvg*0.9+f*0.1 : f; }
   lastT=ts;
+  api.set(12, boxRatio);        // 本家と同じ「毎フレーム少しずつ寄せる」
   api.step(1); blit();
   setText(statusEl, `${fpsAvg.toFixed(0)} fps   粒子 ${(api.get(0)|0).toLocaleString()}   `+
-                    `格子 ${api.get(4)|0}x${api.get(5)|0}x${api.get(6)|0}   MLS-MPM + 画面空間の流体レンダリング`);
+                    `箱 ${api.get(4)|0}x${api.get(5)|0}x${api.get(6)|0}（奥 ${api.get(3).toFixed(0)}）   `+
+                    `MLS-MPM + 画面空間の流体レンダリング`);
   requestAnimationFrame(loop);
 }
 
